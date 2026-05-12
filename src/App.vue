@@ -1,13 +1,50 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { Store } from "@tauri-apps/plugin-store";
 
 const greetMsg = ref("");
 const name = ref("");
 
+const numA = ref(10);
+const numB = ref(20);
+const mathResult = ref<number | null>(null);
+
+// Store states
+const storeInput = ref("");
+const loadedData = ref("");
+const store = new Store("settings.json");
+
+onMounted(async () => {
+  // Load initial data on mount
+  const val = await store.get<string>("my-key");
+  if (val) {
+    loadedData.value = val;
+    storeInput.value = val;
+  }
+});
+
+async function saveToStore() {
+  await store.set("my-key", storeInput.value);
+  await store.save();
+  loadedData.value = storeInput.value;
+}
+
+async function loadFromStore() {
+  const val = await store.get<string>("my-key");
+  loadedData.value = val || "No data found";
+}
+
 async function greet() {
   // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
   greetMsg.value = await invoke("greet", { name: name.value });
+}
+
+async function calculateMath() {
+  mathResult.value = await invoke("add_numbers", {
+    a: Number(numA.value),
+    b: Number(numB.value),
+  });
 }
 </script>
 
@@ -33,6 +70,27 @@ async function greet() {
       <button type="submit">Greet</button>
     </form>
     <p>{{ greetMsg }}</p>
+
+    <div style="margin-top: 2rem;">
+      <h2>Rust Math Test</h2>
+      <div class="row">
+        <input type="number" v-model="numA" style="width: 80px; margin-right: 5px;" />
+        <span style="align-self: center; margin-right: 5px;">+</span>
+        <input type="number" v-model="numB" style="width: 80px; margin-right: 5px;" />
+        <button @click="calculateMath">Calculate</button>
+      </div>
+      <p v-if="mathResult !== null">Result: {{ mathResult }}</p>
+    </div>
+
+    <div style="margin-top: 2rem;">
+      <h2>Cross-Platform Storage Test</h2>
+      <div class="row">
+        <input v-model="storeInput" placeholder="Data to save..." style="margin-right: 5px;" />
+        <button @click="saveToStore" style="margin-right: 5px;">Save (macOS/iOS)</button>
+        <button @click="loadFromStore">Load from Disk</button>
+      </div>
+      <p>Data stored in OS specific location: <strong>{{ loadedData }}</strong></p>
+    </div>
   </main>
 </template>
 
