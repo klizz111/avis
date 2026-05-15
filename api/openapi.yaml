@@ -1,0 +1,467 @@
+openapi: 3.0.3
+info:
+  title: DKG Threshold Sig Service - API Draft
+  version: 0.2.0
+  description: |
+    API draft aligned with server_example routes.
+    Payloads use base64 strings for canonical ark serialization bytes.
+servers:
+  - url: http://127.0.0.1:8443/api/v1
+    description: Local development server
+paths:
+  /healthz:
+    get:
+      summary: Service health check
+      responses:
+        '200':
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /nodes:
+    get:
+      summary: List known nodes
+      responses:
+        '200':
+          description: Node list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodesResponse'
+
+  /dkg/init:
+    post:
+      summary: Start DKG round parameters validation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DkgInitRequest'
+      responses:
+        '200':
+          description: DKG round accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DkgInitResponse'
+
+  /dkg/commitment/submit:
+    post:
+      summary: Submit Feldman commitment vector
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitmentSubmitRequest'
+      responses:
+        '200':
+          description: Commitments decoded and accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitmentSubmitResponse'
+
+  /dkg/share/submit:
+    post:
+      summary: Submit share and perform VSS verification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShareSubmitRequest'
+      responses:
+        '200':
+          description: Share accepted with VSS verification result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShareSubmitResponse'
+
+  /proof/verify:
+    post:
+      summary: Verify Schnorr non-interactive proof of share control
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyProofRequest'
+      responses:
+        '200':
+          description: Proof verification result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyProofResponse'
+
+  /sign/partial:
+    post:
+      summary: Request partial signing task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PartialSignRequest'
+      responses:
+        '200':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericQueuedResponse'
+
+  /bls/aggregate:
+    post:
+      summary: Request aggregation task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AggregateRequest'
+      responses:
+        '200':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericQueuedResponse'
+
+components:
+  schemas:
+    ApiError:
+      type: object
+      properties:
+        ok:
+          type: boolean
+          enum: [false]
+        data:
+          type: object
+          additionalProperties: true
+          nullable: true
+        error:
+          type: string
+      required: [ok, data, error]
+
+    HealthData:
+      type: object
+      properties:
+        service:
+          type: string
+        status:
+          type: string
+        node_id:
+          type: string
+        started_at_unix:
+          type: integer
+          format: int64
+      required: [service, status, node_id, started_at_unix]
+
+    HealthResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/HealthData'
+        error:
+          type: string
+          nullable: true
+      required: [ok, data, error]
+
+    NodesData:
+      type: object
+      properties:
+        nodes:
+          type: array
+          items:
+            type: object
+            properties:
+              node_id:
+                type: string
+              status:
+                type: string
+            required: [node_id, status]
+      required: [nodes]
+
+    NodesResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/NodesData'
+        error:
+          type: string
+          nullable: true
+      required: [ok, data, error]
+
+    DkgInitRequest:
+      type: object
+      properties:
+        round_id:
+          type: string
+        threshold:
+          type: integer
+          minimum: 1
+        participants:
+          type: array
+          items:
+            type: string
+      required: [round_id, threshold, participants]
+
+    DkgInitData:
+      type: object
+      properties:
+        status:
+          type: string
+        round_id:
+          type: string
+        threshold:
+          type: integer
+        participants:
+          type: array
+          items:
+            type: string
+        note:
+          type: string
+      required: [status, round_id, threshold, participants, note]
+
+    DkgInitResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/DkgInitData'
+        error:
+          type: string
+          nullable: true
+      required: [ok, data, error]
+
+    CommitmentSubmitRequest:
+      type: object
+      properties:
+        round_id:
+          type: string
+        node_id:
+          type: string
+        commitments:
+          type: array
+          items:
+            type: string
+          description: base64-encoded canonical G1Affine points
+      required: [round_id, node_id, commitments]
+
+    CommitmentSubmitData:
+      type: object
+      properties:
+        status:
+          type: string
+        round_id:
+          type: string
+        node_id:
+          type: string
+        commitments_count:
+          type: integer
+        note:
+          type: string
+      required: [status, round_id, node_id, commitments_count, note]
+
+    CommitmentSubmitResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/CommitmentSubmitData'
+        error:
+          type: string
+          nullable: true
+      required: [ok, data, error]
+
+    ShareSubmitRequest:
+      type: object
+      properties:
+        round_id:
+          type: string
+        from_node:
+          type: string
+        to_node:
+          type: string
+        to_index:
+          type: integer
+          minimum: 1
+          description: 1-based receiver index used in Feldman check
+        share:
+          type: string
+          description: base64-encoded canonical scalar bytes
+        commitments:
+          type: array
+          items:
+            type: string
+          description: base64-encoded commitment vector for sender polynomial
+      required: [round_id, from_node, to_node, to_index, share, commitments]
+
+    ShareSubmitData:
+      type: object
+      properties:
+        status:
+          type: string
+        round_id:
+          type: string
+        from:
+          type: string
+        to:
+          type: string
+        to_index:
+          type: integer
+        commitments_count:
+          type: integer
+        vss_share_valid:
+          type: boolean
+      required: [status, round_id, from, to, to_index, commitments_count, vss_share_valid]
+
+    ShareSubmitResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/ShareSubmitData'
+        error:
+          type: string
+          nullable: true
+      required: [ok, data, error]
+
+    ProofShare:
+      type: object
+      properties:
+        R:
+          type: string
+          description: base64-encoded canonical G1 point
+        s:
+          type: string
+          description: base64-encoded canonical scalar
+        nonce:
+          type: integer
+        ts:
+          type: integer
+        pk_share:
+          type: string
+          description: base64-encoded canonical G1 point
+      required: [R, s, nonce, ts, pk_share]
+
+    VerifyProofRequest:
+      type: object
+      properties:
+        message:
+          type: string
+          description: base64-encoded message bytes
+        proof:
+          $ref: '#/components/schemas/ProofShare'
+      required: [message, proof]
+
+    VerifyProofData:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        reason:
+          type: string
+          nullable: true
+      required: [valid, reason]
+
+    VerifyProofResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/VerifyProofData'
+        error:
+          type: string
+          nullable: true
+      required: [ok, data, error]
+
+    PartialSignRequest:
+      type: object
+      properties:
+        node_id:
+          type: string
+        message:
+          type: string
+          description: base64-encoded message bytes
+        share:
+          type: string
+          description: base64-encoded scalar share (demo-only)
+        proof:
+          $ref: '#/components/schemas/ProofShare'
+      required: [node_id, message, share, proof]
+
+    AggregateRequest:
+      type: object
+      properties:
+        message:
+          type: string
+          description: base64-encoded message bytes
+        partial_signatures:
+          type: array
+          items:
+            type: string
+          description: base64-encoded canonical G2Affine signatures
+      required: [message, partial_signatures]
+
+    AggregateData:
+      type: object
+      properties:
+        status:
+          type: string
+        message_size:
+          type: integer
+        partial_count:
+          type: integer
+        signature:
+          type: string
+          description: base64-encoded canonical G2Affine aggregated signature
+      required: [status, message_size, partial_count, signature]
+
+    AggregateResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/AggregateData'
+        error:
+          type: string
+          nullable: true
+      required: [ok, data, error]
+
+    GenericQueuedData:
+      type: object
+      properties:
+        status:
+          type: string
+        note:
+          type: string
+      required: [status, note]
+
+    GenericQueuedResponse:
+      type: object
+      properties:
+        ok:
+          type: boolean
+        data:
+          type: object
+          additionalProperties: true
+        error:
+          type: string
+          nullable: true
+      required: [ok, data, error]

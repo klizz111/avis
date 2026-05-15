@@ -1,18 +1,19 @@
 #![allow(non_snake_case)]
 use ark_bn254::{Fr as Scalar, G1Affine, G1Projective};
-use ark_ec::AffineRepr;
+use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::UniformRand;
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::Rng;
 use blake2::{Blake2s256, Digest};
 
 // Schnorr proof over group G1 proving knowledge of `share` such that PK_share = g^share
-pub fn schnorr_prove<R: Rng>(rng: &mut R, share: Scalar, pk_share: G1Affine, message: &[u8], nonce: u64, ts: u64) -> (G1Projective, Scalar) {
+pub fn schnorr_prove<R: Rng>(rng: &mut R, share: Scalar, pk_share: G1Affine, message: &[u8], nonce: u64, ts: u64) -> (G1Affine, Scalar) {
     let k = Scalar::rand(rng);
     let g = G1Affine::generator();
-    let R = g * k; // projective
+    let R_proj = g * k; // projective
+    let R = R_proj.into_affine();
 
-    // serialize pk_share and R to bytes
+    // serialize pk_share and R (affine) to bytes
     let mut buf = Vec::new();
     pk_share.serialize_uncompressed(&mut buf).unwrap();
     R.serialize_uncompressed(&mut buf).unwrap();
@@ -30,7 +31,7 @@ pub fn schnorr_prove<R: Rng>(rng: &mut R, share: Scalar, pk_share: G1Affine, mes
     (R, s)
 }
 
-pub fn schnorr_verify(pk_share: G1Affine, R: G1Projective, s: Scalar, message: &[u8], nonce: u64, ts: u64) -> bool {
+pub fn schnorr_verify(pk_share: G1Affine, R: G1Affine, s: Scalar, message: &[u8], nonce: u64, ts: u64) -> bool {
     // recompute c
     let mut buf = Vec::new();
     pk_share.serialize_uncompressed(&mut buf).unwrap();
@@ -48,6 +49,7 @@ pub fn schnorr_verify(pk_share: G1Affine, R: G1Projective, s: Scalar, message: &
     let g = G1Affine::generator();
     // check s*G == R + c*PK
     let left = g * s; // projective
-    let right = R + (pk_share * c);
+    let R_proj = G1Projective::from(R);
+    let right = R_proj + (pk_share * c);
     left == right
 }
