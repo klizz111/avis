@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 
 type ApiEnvelope<T> = {
   ok: boolean;
@@ -28,6 +27,75 @@ type ProofPayload = {
   ts: number;
 };
 
+type ProofVerifyData = {
+  valid: boolean;
+  reason: string | null;
+};
+
+type PartialSignatureData = {
+  sigma?: string;
+};
+
+type AggregateData = {
+  signature?: string;
+  verified?: boolean;
+  threshold_public_key_b64?: string | null;
+  partial_count?: number;
+};
+
+type DemoNodeData = {
+  node_id: string;
+  commitments_b64: string[];
+  share_to_user_b64: string;
+  final_share_b64: string;
+  public_share_b64: string;
+};
+
+type DemoRoundData = {
+  round_id: string;
+  threshold: number;
+  participants: string[];
+  user_index: number;
+  user_seed: number;
+  user_share_b64: string;
+  user_pk_share_b64: string;
+  threshold_public_key_b64: string;
+  nodes: DemoNodeData[];
+};
+
+type DkgInitData = {
+  status: string;
+  round_id: string;
+  threshold: number;
+  participants: string[];
+  note: string;
+  demo_round?: DemoRoundData;
+};
+
+type DemoRunData = {
+  status: string;
+  round_id: string;
+  threshold: number;
+  partial_count: number;
+  partial_signatures: string[];
+  signature: string;
+  verified: boolean;
+  threshold_public_key_b64: string;
+  proof_valid: boolean;
+  user_seed: number;
+  reason?: string;
+};
+
+type DemoStepStatus = "idle" | "running" | "done" | "error";
+
+type DemoStep = {
+  key: string;
+  title: string;
+  description: string;
+  status: DemoStepStatus;
+  detail: string;
+};
+
 const apiBaseUrl = ref(localStorage.getItem("avis.apiBaseUrl") || "http://127.0.0.1:8443/api/v1");
 const proofMessageText = ref("threshold signature demo");
 const shareSeed = ref(7);
@@ -43,6 +111,54 @@ const shareResult = ref("No request yet.");
 const proofVerifyResult = ref("No request yet.");
 const partialSignResult = ref("No request yet.");
 const aggregateResult = ref("No request yet.");
+const demoStatus = ref("Idle.");
+const demoLog = ref("No demo run yet.");
+const demoRunning = ref(false);
+const activeDemoRound = ref<DemoRoundData | null>(null);
+const demoSteps = reactive<DemoStep[]>([
+  {
+    key: "health",
+    title: "Service health",
+    description: "Check that the API gateway is reachable.",
+    status: "idle",
+    detail: "Waiting to start.",
+  },
+  {
+    key: "nodes",
+    title: "Node discovery",
+    description: "Read the mock node list before dispatching work.",
+    status: "idle",
+    detail: "Waiting to start.",
+  },
+  {
+    key: "dkg",
+    title: "DKG bootstrap",
+    description: "Submit the round parameters and get the session accepted.",
+    status: "idle",
+    detail: "Waiting to start.",
+  },
+  {
+    key: "proof",
+    title: "Schnorr proof",
+    description: "Generate a local proof for the threshold share.",
+    status: "idle",
+    detail: "Waiting to start.",
+  },
+  {
+    key: "partial",
+    title: "Partial signing",
+    description: "Ask a node to issue a partial signature after proof check.",
+    status: "idle",
+    detail: "Waiting to start.",
+  },
+  {
+    key: "aggregate",
+    title: "Signature aggregation",
+    description: "Combine partial signatures and verify the final result.",
+    status: "idle",
+    detail: "Waiting to start.",
+  },
+]);
 
 const dkgRoundId = ref("round-001");
 const dkgThreshold = ref(2);
@@ -96,6 +212,59 @@ function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function parseEnvelope<T>(value: string): ApiEnvelope<T> | null {
+  try {
+    return JSON.parse(value) as ApiEnvelope<T>;
+  } catch {
+    return null;
+  }
+}
+
+function appendDemoLog(line: string) {
+  demoLog.value = demoLog.value ? `${demoLog.value}\n${line}` : line;
+}
+
+function resetDemoSteps() {
+  demoSteps.forEach((step) => {
+    step.status = "idle";
+    step.detail = "Waiting to start.";
+  });
+}
+
+function updateDemoStep(key: string, status: DemoStepStatus, detail: string) {
+  const step = demoSteps.find((item) => item.key === key);
+  if (!step) {
+    return;
+  }
+  step.status = status;
+  step.detail = detail;
+}
+
+function applyDemoRound(round: DemoRoundData) {
+  activeDemoRound.value = round;
+  dkgRoundId.value = round.round_id;
+  dkgThreshold.value = round.threshold;
+  dkgParticipants.value = round.participants.join("\n");
+
+  commitmentRoundId.value = round.round_id;
+  commitmentNodeId.value = round.participants[0] || commitmentNodeId.value;
+  commitmentList.value = round.nodes[0]?.commitments_b64.join("\n") || "";
+
+  shareRoundId.value = round.round_id;
+  shareFromNode.value = round.nodes[0]?.node_id || shareFromNode.value;
+  shareToNode.value = round.participants[round.user_index - 1] || shareToNode.value;
+  shareToIndex.value = round.user_index;
+  shareValue.value = round.nodes[0]?.share_to_user_b64 || "";
+  shareCommitments.value = round.nodes[0]?.commitments_b64.join("\n") || "";
+
+  partialNodeId.value = round.participants[round.user_index - 1] || partialNodeId.value;
+  partialShareB64.value = round.user_share_b64;
+  partialProofPkShare.value = round.user_pk_share_b64;
+
+  aggregateMessageText.value = proofMessageText.value;
+  aggregatePartialSignatures.value = "";
+}
+
 async function postJson<T>(path: string, body: unknown): Promise<ApiEnvelope<T>> {
   try {
     const response = await fetch(`${normalizeBaseUrl(apiBaseUrl.value)}${path}`, {
@@ -142,13 +311,28 @@ async function submitDkgInit() {
     .map((item) => item.trim())
     .filter(Boolean);
 
-  dkgInitResult.value = formatJson(
-    await postJson("/dkg/init", {
+  const response = await postJson<DkgInitData>("/dkg/init", {
       round_id: dkgRoundId.value,
       threshold: Number(dkgThreshold.value),
       participants,
-    }),
-  );
+    });
+
+  dkgInitResult.value = formatJson(response);
+  if (response.ok && response.data?.demo_round) {
+    applyDemoRound(response.data.demo_round);
+  }
+
+  return response;
+}
+
+async function requestDemoProof() {
+  return postJson<GeneratedProof>("/demo/proof", {
+    round_id: activeDemoRound.value?.round_id || dkgRoundId.value,
+    message: proofMessageText.value,
+    seed: Number(shareSeed.value),
+    nonce: Number(nonceValue.value),
+    timestamp: Number(timestampValue.value),
+  });
 }
 
 async function submitCommitments() {
@@ -186,6 +370,7 @@ async function submitShare() {
 
 function syncGeneratedProof(bundle: GeneratedProof) {
   proofMessageText.value = bundle.message_text;
+  shareSeed.value = bundle.seed;
   partialMessageText.value = bundle.message_text;
   partialShareB64.value = bundle.share_b64;
   partialProofR.value = bundle.r_b64;
@@ -197,38 +382,36 @@ function syncGeneratedProof(bundle: GeneratedProof) {
 }
 
 async function generateProof() {
-  const bundle = (await invoke("generate_demo_proof", {
-    message: proofMessageText.value,
-    seed: Number(shareSeed.value),
-    nonce: Number(nonceValue.value),
-    timestamp: Number(timestampValue.value),
-  })) as GeneratedProof;
+  const response = await requestDemoProof();
+  if (!response.ok || !response.data) {
+    throw new Error(response.error || "proof generation failed");
+  }
 
-  generatedProof.value = bundle;
-  syncGeneratedProof(bundle);
+  generatedProof.value = response.data;
+  syncGeneratedProof(response.data);
+  return response.data;
 }
 
 async function verifyProof() {
-  proofVerifyResult.value = formatJson(
-    await postJson("/proof/verify", {
-      message: textToBase64(partialMessageText.value),
-      proof: proofPayload.value,
-    }),
-  );
+  const response = await postJson<ProofVerifyData>("/proof/verify", {
+    message: textToBase64(partialMessageText.value),
+    proof: proofPayload.value,
+  });
+  proofVerifyResult.value = formatJson(response);
+  return response;
 }
 
 async function requestPartialSignature() {
-  partialSignResult.value = formatJson(
-    await postJson("/sign/partial", {
-      node_id: partialNodeId.value,
-      message: textToBase64(partialMessageText.value),
-      share: partialShareB64.value,
-      proof: proofPayload.value,
-    }),
-  );
+  const response = await postJson<PartialSignatureData>("/sign/partial", {
+    node_id: partialNodeId.value,
+    message: textToBase64(partialMessageText.value),
+    share: partialShareB64.value,
+    proof: proofPayload.value,
+  });
+  partialSignResult.value = formatJson(response);
 
   try {
-    const payload = JSON.parse(partialSignResult.value) as ApiEnvelope<{ sigma?: string }>;
+    const payload = response;
     const signature = payload.data?.sigma;
     if (typeof signature === "string" && signature.trim().length > 0) {
       aggregatePartialSignatures.value = aggregatePartialSignatures.value
@@ -238,6 +421,8 @@ async function requestPartialSignature() {
   } catch {
     // Keep the response visible even if parsing fails.
   }
+
+  return response;
 }
 
 async function aggregateSignatures() {
@@ -246,12 +431,130 @@ async function aggregateSignatures() {
     .map((item) => item.trim())
     .filter(Boolean);
 
-  aggregateResult.value = formatJson(
-    await postJson("/bls/aggregate", {
-      message: textToBase64(aggregateMessageText.value),
-      partial_signatures: partials,
-    }),
-  );
+  const response = await postJson<AggregateData>("/bls/aggregate", {
+    message: textToBase64(aggregateMessageText.value),
+    partial_signatures: partials,
+  });
+  aggregateResult.value = formatJson(response);
+  return response;
+}
+
+async function runDemoSignAndAggregate() {
+  const response = await postJson<DemoRunData>("/demo/run", {
+    round_id: activeDemoRound.value?.round_id || dkgRoundId.value,
+    message: textToBase64(partialMessageText.value),
+    proof: proofPayload.value,
+  });
+
+  partialSignResult.value = formatJson(response);
+
+  if (response.ok && response.data) {
+    aggregatePartialSignatures.value = response.data.partial_signatures.join("\n");
+    aggregateResult.value = formatJson({
+      ok: true,
+      data: {
+        status: response.data.status,
+        signature: response.data.signature,
+        verified: response.data.verified,
+        partial_count: response.data.partial_count,
+        threshold_public_key_b64: response.data.threshold_public_key_b64,
+      },
+      error: null,
+    });
+  }
+
+  return response;
+}
+
+async function runFullDemo() {
+  demoRunning.value = true;
+  demoStatus.value = "Running complete demo...";
+  demoLog.value = "";
+  aggregatePartialSignatures.value = "";
+  resetDemoSteps();
+
+  try {
+    appendDemoLog("1. Checking API health.");
+    updateDemoStep("health", "running", "Sending health check request.");
+    await checkHealth();
+    const health = parseEnvelope<unknown>(serviceHealth.value);
+    if (!health?.ok) {
+      updateDemoStep("health", "error", health?.error || "health check failed");
+      throw new Error(health?.error || "health check failed");
+    }
+    updateDemoStep("health", "done", "API gateway responded with ok.");
+    appendDemoLog("   Health check passed.");
+
+    appendDemoLog("2. Refreshing node list.");
+    updateDemoStep("nodes", "running", "Requesting the current mock node list.");
+    await refreshNodes();
+    const nodes = parseEnvelope<unknown>(knownNodes.value);
+    if (!nodes?.ok) {
+      updateDemoStep("nodes", "error", nodes?.error || "node discovery failed");
+      throw new Error(nodes?.error || "node discovery failed");
+    }
+    updateDemoStep("nodes", "done", "Mock MPC nodes were discovered.");
+    appendDemoLog("   Node discovery passed.");
+
+    appendDemoLog("3. Initializing DKG round.");
+    updateDemoStep("dkg", "running", "Submitting round id, threshold, and participants.");
+    const dkgResponse = await submitDkgInit();
+    const dkg = dkgResponse;
+    if (!dkg?.ok) {
+      updateDemoStep("dkg", "error", dkg?.error || "DKG bootstrap failed");
+      throw new Error(dkg?.error || "DKG bootstrap failed");
+    }
+    updateDemoStep("dkg", "done", "DKG round accepted by the API.");
+    appendDemoLog("   DKG bootstrap accepted.");
+
+    appendDemoLog("4. Generating local Schnorr proof.");
+    updateDemoStep("proof", "running", "Creating proof from the demo share seed.");
+    const proofResponse = await requestDemoProof();
+    if (!proofResponse.ok || !proofResponse.data) {
+      updateDemoStep("proof", "error", proofResponse.error || "proof generation failed");
+      throw new Error(proofResponse.error || "proof generation failed");
+    }
+    generatedProof.value = proofResponse.data;
+    syncGeneratedProof(proofResponse.data);
+    if (!generatedProof.value) {
+      updateDemoStep("proof", "error", "proof generation failed");
+      throw new Error("proof generation failed");
+    }
+    updateDemoStep("proof", "done", "Local proof and share bundle were generated.");
+    appendDemoLog("   Proof bundle generated.");
+
+    appendDemoLog("5. Verifying the proof against the API.");
+    updateDemoStep("proof", "running", "Verifying the proof payload with the backend.");
+    await verifyProof();
+    const proof = parseEnvelope<ProofVerifyData>(proofVerifyResult.value);
+    if (!proof?.ok || !proof.data?.valid) {
+      updateDemoStep("proof", "error", proof?.data?.reason || proof?.error || "proof verification failed");
+      throw new Error(proof?.data?.reason || proof?.error || "proof verification failed");
+    }
+    updateDemoStep("proof", "done", "Schnorr verification passed.");
+    appendDemoLog("   Schnorr verification passed.");
+
+    appendDemoLog("6. Asking the backend to sign and aggregate the active demo round.");
+    updateDemoStep("partial", "running", "Backend is issuing threshold partial signatures.");
+    updateDemoStep("aggregate", "running", "Backend is aggregating and verifying the final signature.");
+    await runDemoSignAndAggregate();
+    const demoRun = parseEnvelope<DemoRunData>(partialSignResult.value);
+    if (!demoRun?.ok || !demoRun.data?.verified || !demoRun.data?.signature) {
+      updateDemoStep("partial", "error", demoRun?.error || demoRun?.data?.reason || "demo signing failed");
+      updateDemoStep("aggregate", "error", demoRun?.error || demoRun?.data?.reason || "demo aggregation failed");
+      throw new Error(demoRun?.error || demoRun?.data?.reason || "demo signing failed");
+    }
+    updateDemoStep("partial", "done", `Backend returned ${demoRun.data.partial_count} partial signatures.`);
+    updateDemoStep("aggregate", "done", "Aggregate signature verified by the backend.");
+    appendDemoLog("   Backend demo run completed and verified.");
+
+    demoStatus.value = "Demo completed successfully.";
+  } catch (error) {
+    demoStatus.value = `Demo failed: ${error instanceof Error ? error.message : String(error)}`;
+    appendDemoLog(demoStatus.value);
+  } finally {
+    demoRunning.value = false;
+  }
 }
 
 function adoptGeneratedProof() {
@@ -292,7 +595,41 @@ watch(apiBaseUrl, (value) => {
           <span>Proof state</span>
           <strong>{{ generatedProof ? "ready" : "idle" }}</strong>
         </div>
+        <div class="metric">
+          <span>Demo status</span>
+          <strong>{{ demoStatus }}</strong>
+        </div>
       </div>
+    </section>
+
+    <section class="card panel demo-panel">
+      <div class="panel-head">
+        <div>
+          <p class="panel-kicker">Quick demo</p>
+          <h2>Run the full visible workflow in one click</h2>
+        </div>
+      </div>
+      <p class="hero-copy demo-copy">
+        This button reuses the existing frontend fields and walks through health check, DKG bootstrap,
+        proof generation, proof verification, partial signing, and aggregation in sequence.
+      </p>
+      <div class="actions">
+        <button type="button" @click="runFullDemo" :disabled="demoRunning">Run full demo</button>
+      </div>
+      <div class="step-grid">
+        <article v-for="step in demoSteps" :key="step.key" class="step-card" :class="step.status">
+          <div class="step-card-head">
+            <div>
+              <p class="step-label">{{ step.key }}</p>
+              <h3>{{ step.title }}</h3>
+            </div>
+            <span class="step-badge">{{ step.status }}</span>
+          </div>
+          <p class="step-copy">{{ step.description }}</p>
+          <pre>{{ step.detail }}</pre>
+        </article>
+      </div>
+      <pre class="demo-log">{{ demoLog }}</pre>
     </section>
 
     <section class="grid two-up">
@@ -772,10 +1109,113 @@ details pre {
     rgba(255, 255, 255, 0.74);
 }
 
+.demo-panel {
+  margin-top: 18px;
+}
+
+.demo-copy {
+  margin-bottom: 14px;
+}
+
+.step-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.step-card {
+  padding: 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(24, 39, 57, 0.1);
+  background: rgba(255, 255, 255, 0.82);
+  display: grid;
+  gap: 10px;
+  min-height: 100%;
+}
+
+.step-card.running {
+  border-color: rgba(245, 179, 92, 0.48);
+  box-shadow: inset 0 0 0 1px rgba(245, 179, 92, 0.18);
+}
+
+.step-card.done {
+  border-color: rgba(60, 145, 118, 0.35);
+  background: linear-gradient(180deg, rgba(240, 252, 247, 0.96), rgba(255, 255, 255, 0.88));
+}
+
+.step-card.error {
+  border-color: rgba(183, 64, 54, 0.42);
+  background: linear-gradient(180deg, rgba(255, 241, 239, 0.96), rgba(255, 255, 255, 0.88));
+}
+
+.step-card-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.step-label {
+  margin: 0 0 4px;
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(18, 33, 47, 0.52);
+}
+
+.step-card h3 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.35;
+}
+
+.step-copy {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: rgba(18, 33, 47, 0.76);
+}
+
+.step-badge {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 0.72rem;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  background: rgba(24, 50, 70, 0.08);
+  color: #183246;
+}
+
+.step-card.running .step-badge {
+  background: rgba(245, 179, 92, 0.18);
+  color: #8a5a00;
+}
+
+.step-card.done .step-badge {
+  background: rgba(60, 145, 118, 0.15);
+  color: #2f715b;
+}
+
+.step-card.error .step-badge {
+  background: rgba(183, 64, 54, 0.16);
+  color: #9e352e;
+}
+
+.demo-log {
+  min-height: 126px;
+}
+
 @media (max-width: 1080px) {
   .hero,
   .two-up {
     grid-template-columns: 1fr;
+  }
+
+  .step-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -790,6 +1230,7 @@ details pre {
     padding: 18px;
   }
 
+  .step-grid,
   .form-grid {
     grid-template-columns: 1fr;
   }

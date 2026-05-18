@@ -1,6 +1,0 @@
-[workspace]
-resolver = "3"
-members = [
-    "crates/math_core",
-    "api/server_example"
-]

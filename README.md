@@ -20,6 +20,60 @@
 - `api/openapi.yaml`：接口草案，描述健康检查、DKG、证明验证、部分签名和聚合接口。
 - `api/server_example/`：axum 示例后端，用于验证前端请求和协议消息格式。
 
+## Flow Chart
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as 用户
+    participant AIAudit as AI审计网关(每个MPC节点分别拥有一个)
+    participant NodeA as MPC节点 A
+    participant NodeB as MPC节点 B
+    participant NodeC as MPC节点 C
+    participant NodeD as MPC节点 D
+    participant Verifier as 验证方
+
+    rect rgb(240, 248, 255)
+        note over User,NodeD: 阶段一：DKG 生成份额（无人持有完整私钥）
+        User->>User: 1. 生成本地随机种子并参与 DKG, 生成多项式 f_U 并广播承诺 C_U, 得到自己的私钥 SK_U = f_U(0) 和公钥 PK_U
+        NodeA->>NodeA: 2. 生成多项式 f_A 并广播承诺 C_A
+        NodeB->>NodeB: 3. 生成多项式 f_B 并广播承诺 C_B
+        NodeC->>NodeC: 4. 生成多项式 f_C 并广播承诺 C_C
+        NodeD->>NodeD: 5. 生成多项式 f_D 并广播承诺 C_D
+        Note over User,NodeD: 6. 各方私下交换子份额并验证，得到自己的最终份额 Share_U / Share_A..Share_D
+        Note over User, NodeD: 7. 计算全局公钥并公开 PK = g^{F(0)} = C_U[0] * C_A[0] * C_B[0] * C_C[0] * C_D[0]
+    end
+
+    rect rgb(255, 250, 240)
+        note over User,NodeD: 阶段二：用户发起签名请求，先进入 AI 审计层再进入 MPC 节点
+        User->>User: 8. 生成 Schnorr NIZK 证明 自己持有 PK_U 对应的私钥 SK_U
+        User->>AIAudit: 9. 发送 Sign_Request(M, Proof_share, nonce, ts)
+        AIAudit->>AIAudit: 10. 识别签名请求意图、风险特征与异常上下文（异步）
+        AIAudit->>NodeA: 11. 放行给 MPC 节点 A
+        AIAudit->>NodeB: 12. 放行给 MPC 节点 B
+        AIAudit->>NodeC: 13. 放行给 MPC 节点 C
+    end
+
+    rect rgb(245, 255, 250)
+        note over AIAudit,NodeD: 阶段三：MPC 节点执行内部审计，并结合 AI 审计层结果生成部分签名
+        NodeA->>NodeA: 14. 验证 Proof_share和内部审计规则
+        NodeB->>NodeB: 15. 验证 Proof_share和内部审计规则
+        NodeC->>NodeC: 16. 验证 Proof_share和内部审计规则
+        NodeA-->>AIAudit: 17. 返回 sigma_A 与审计记录
+        NodeB-->>AIAudit: 18. 返回 sigma_B 与审计记录
+        NodeC-->>AIAudit: 19. 返回 sigma_C 与审计记录
+        AIAudit-->>User: 20. 依据审计结果判断是否放行请求
+    end
+
+    rect rgb(230, 230, 255)
+        note over User,Verifier: 阶段四：聚合与验证
+        User->>User: 21. 聚合部分签名得到对应公钥PK的签名 sigma_final
+        User->>Verifier: 22. 提交 M 和 sigma_final
+        Verifier->>Verifier: 23. 使用公钥 PK 验证
+        Verifier-->>User: 24. 验证通过
+    end
+```
+
 ## 当前进展
 
 下面是目前已经落地的内容，便于新加入的人快速判断项目状态：
@@ -75,7 +129,7 @@ $$
 全局公钥与私钥常数项一致：
 
 $$
-PK = g^{F(0)}
+PK = g^{F(0)} = \prod_i C_{i,0}
 $$
 
 ### 份额控制证明

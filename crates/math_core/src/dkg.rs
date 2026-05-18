@@ -116,6 +116,16 @@ pub fn verify_share(commitments: &[G1Affine], share: Scalar, j: u64) -> bool {
     left == rhs
 }
 
+/// Reconstruct the global public key from the constant-term commitments.
+/// For Feldman DKG this is PK = g^{F(0)} = \prod_i C_{i,0}.
+pub fn global_public_key_from_commitments(commitments: &[Vec<G1Affine>]) -> G1Affine {
+    let mut pk = G1Projective::zero();
+    for participant_commitments in commitments {
+        pk += &participant_commitments[0];
+    }
+    pk.into_affine()
+}
+
 /// Simple hash-to-field: map a message bytes to a Scalar by folding bytes into u64 then into field.
 pub fn hash_to_field(msg: &[u8]) -> Scalar {
     use blake2::{Blake2s256, Digest};

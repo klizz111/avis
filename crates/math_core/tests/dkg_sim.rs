@@ -1,9 +1,9 @@
 use ark_bn254::{Fr as Scalar, G1Affine, G1Projective};
-use ark_ec::{AffineRepr, CurveGroup};
+use ark_ec::CurveGroup;
 use ark_ff::{One, Zero};
 use ark_std::test_rng;
 use math_core::bls::{sign, verify};
-use math_core::dkg::{hash_to_field, lagrange_coeff_at_zero, simulate_dkg};
+use math_core::dkg::{global_public_key_from_commitments, lagrange_coeff_at_zero, simulate_dkg, verify_share};
 use math_core::schnorr::{schnorr_prove, schnorr_verify};
 
 #[test]
@@ -12,47 +12,52 @@ fn full_protocol_demo() {
     let n = 5;
     let t = 3;
 
-    let (_polys, _shares, s_values, sk, commitments) = simulate_dkg(n, t);
+    // `shares` is the matrix of Feldman VSS sub-shares s_{i->j}.
+    // `sk_user` below is only the user's final threshold share S_user, not a full private key.
+    let (_polys, shares, final_shares, _sk_global, commitments) = simulate_dkg(n, t);
+    let threshold_public_key = global_public_key_from_commitments(&commitments);
 
-    let user_idx = 1u64;
-    let user_share = s_values[(user_idx - 1) as usize];
+    let user_index = 1u64;
+    let sk_user = final_shares[(user_index - 1) as usize];
 
+    // Rebuild the user's public share key from all participants' commitments.
     let mut pk_share_proj = G1Projective::zero();
     for i in 0..n {
         let mut jpow = Scalar::one();
-        let j_scalar = Scalar::from(user_idx);
+        let j_scalar = Scalar::from(user_index);
         for k in 0..commitments[i].len() {
             let term_proj = commitments[i][k] * jpow;
             pk_share_proj += &term_proj;
             jpow *= &j_scalar;
         }
     }
-    let pk_share_aff: G1Affine = pk_share_proj.into_affine();
+    let pk_user: G1Affine = pk_share_proj.into_affine();
+
+    // Verify each participant's sub-share against its own commitments.
+    for i in 0..n {
+        assert!(verify_share(&commitments[i], shares[i][user_index as usize - 1], user_index));
+    }
 
     let message = b"message to sign";
     let nonce = 42u64;
     let ts = 123456u64;
-    let (r, s) = schnorr_prove(&mut rng, user_share, pk_share_aff, message, nonce, ts);
-    assert!(schnorr_verify(pk_share_aff, r, s, message, nonce, ts));
+    // Schnorr proves control of the user's threshold secret share, paired with the user's share public key.
+    let (r, s) = schnorr_prove(&mut rng, sk_user, pk_user, message, nonce, ts);
+    assert!(schnorr_verify(pk_user, r, s, message, nonce, ts));
 
-    let hm = hash_to_field(message);
-    let mut partial_sigs: Vec<Scalar> = Vec::new();
+    // Collect t partial BLS signatures and aggregate them with Lagrange coefficients.
+    let mut partial_sigs = Vec::new();
     let mut indices: Vec<u64> = Vec::new();
     for j in 0..t {
-        partial_sigs.push(s_values[j] * &hm);
+        partial_sigs.push(sign(&final_shares[j], message));
         indices.push((j + 1) as u64);
     }
 
-    let mut agg = Scalar::zero();
+    let mut agg = ark_bn254::G2Projective::zero();
     for j in 0..t {
         let lambda = lagrange_coeff_at_zero(&indices, j);
-        agg += &(lambda * &partial_sigs[j]);
+        agg += &(partial_sigs[j] * lambda);
     }
 
-    let expected = sk * &hm;
-    assert_eq!(agg, expected);
-
-    let bls_public_key = (G1Affine::generator() * sk).into_affine();
-    let bls_signature = sign(&sk, message);
-    assert!(verify(&bls_public_key, message, &bls_signature));
+    assert!(verify(&threshold_public_key, message, &agg.into_affine()));
 }
