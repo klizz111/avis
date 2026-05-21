@@ -328,13 +328,19 @@ fn encode_point_vec_b64(points: &[G1Affine]) -> Result<Vec<String>, String> {
 fn decode_point_to_affine_b64(s: &str) -> Result<G1Affine, String> {
     let bytes = general_purpose::STANDARD.decode(s).map_err(|e| e.to_string())?;
     let mut cur = Cursor::new(&bytes);
-    if let Ok(p) = G1Affine::deserialize_compressed(&mut cur) {
-        return Ok(p);
+    if let Ok(p) = G1Affine::deserialize_uncompressed(&mut cur) {
+        if cur.position() == bytes.len() as u64 {
+            return Ok(p);
+        }
     }
+
     let mut cur2 = Cursor::new(&bytes);
-    if let Ok(p) = G1Affine::deserialize_uncompressed(&mut cur2) {
-        return Ok(p);
+    if let Ok(p) = G1Affine::deserialize_compressed(&mut cur2) {
+        if cur2.position() == bytes.len() as u64 {
+            return Ok(p);
+        }
     }
+
     Err("failed to decode point as affine compressed or uncompressed".to_string())
 }
 
@@ -347,11 +353,20 @@ fn decode_scalar_b64(s: &str) -> Result<Scalar, String> {
 fn decode_g2_to_affine_b64(s: &str) -> Result<G2Affine, String> {
     let bytes = general_purpose::STANDARD.decode(s).map_err(|e| e.to_string())?;
     let mut cur = Cursor::new(&bytes);
-    if let Ok(p) = G2Affine::deserialize_compressed(&mut cur) {
-        return Ok(p);
+    if let Ok(p) = G2Affine::deserialize_uncompressed(&mut cur) {
+        if cur.position() == bytes.len() as u64 {
+            return Ok(p);
+        }
     }
+
     let mut cur2 = Cursor::new(&bytes);
-    G2Affine::deserialize_uncompressed(&mut cur2).map_err(|e| e.to_string())
+    if let Ok(p) = G2Affine::deserialize_compressed(&mut cur2) {
+        if cur2.position() == bytes.len() as u64 {
+            return Ok(p);
+        }
+    }
+
+    Err("failed to decode G2 point as affine compressed or uncompressed".to_string())
 }
 
 fn derive_public_share(commitments: &[Vec<G1Affine>], receiver_index: u64) -> G1Affine {
@@ -608,6 +623,12 @@ async fn verify_proof(
     }
 
     let ok = schnorr_verify(pk_aff, R_aff, s_scalar, &message, req.proof.nonce, req.proof.ts);
+    if !ok {
+        // Debug output to help diagnose mismatches between generated proof and verifier
+        eprintln!("[debug] verify_proof failed: pk_share_b64={} R_b64={} s_b64={} nonce={} ts={} message_len={}",
+            req.proof.pk_share, req.proof.R, req.proof.s, req.proof.nonce, req.proof.ts, message.len());
+    }
+
     Json(ApiResponse::success(VerifyProofData {
         valid: ok,
         reason: if ok { None } else { Some("proof verification failed".to_string()) },
@@ -631,8 +652,8 @@ async fn sign_partial(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PartialSignRequest>,
 ) -> Json<ApiResponse<serde_json::Value>> {
-    if req.node_id.is_empty() || req.message.is_empty() || req.share.is_empty() {
-        return Json(ApiResponse::fail("node_id/message/share cannot be empty"));
+    if req.node_id.is_empty() || req.message.is_empty() {
+        return Json(ApiResponse::fail("node_id/message cannot be empty"));
     }
 
     let message = match general_purpose::STANDARD.decode(&req.message) {
@@ -640,9 +661,9 @@ async fn sign_partial(
         Err(e) => return Json(ApiResponse::fail(format!("bad base64 message: {}", e))),
     };
 
-    let share_scalar = match decode_scalar_b64(&req.share) {
+    let proof_pk = match decode_point_to_affine_b64(&req.proof.pk_share) {
         Ok(v) => v,
-        Err(e) => return Json(ApiResponse::fail(format!("share decode: {}", e))),
+        Err(e) => return Json(ApiResponse::fail(format!("pk decode: {}", e))),
     };
 
     let proof_r = match decode_point_to_affine_b64(&req.proof.R) {
@@ -656,42 +677,43 @@ async fn sign_partial(
     };
 
     let cluster = state.cluster.lock().expect("cluster lock poisoned");
-    let round = cluster.round(req.round_id.as_deref());
-
-    let proof_pk = if let Some(round) = round {
-        let node_index = match round.participants.iter().position(|participant| participant == &req.node_id) {
-            Some(index) => index,
-            None => return Json(ApiResponse::fail("unknown node_id for this round")),
-        };
-
-        let expected_share = round.final_shares[node_index];
-        if share_scalar != expected_share {
-            return Json(ApiResponse::fail("share does not match the active demo round"));
-        }
-
-        round.public_shares[node_index]
-    } else {
-        (G1Affine::generator() * share_scalar).into_affine()
+    let round = match cluster.round(req.round_id.as_deref()) {
+        Some(round) => round,
+        None => return Json(ApiResponse::fail("round_id is required and must reference an active demo round")),
     };
 
-    let derived_pk = (G1Affine::generator() * share_scalar).into_affine();
-    if proof_pk != derived_pk {
-        return Json(ApiResponse::fail("pk_share does not match provided share"));
+    let node_index = match round.participants.iter().position(|participant| participant == &req.node_id) {
+        Some(index) => index,
+        None => return Json(ApiResponse::fail("unknown node_id for this round")),
+    };
+
+    let user_index = round.user_index - 1;
+    let user_share = round.final_shares[user_index];
+    let user_pk = round.public_shares[user_index];
+
+    if proof_pk != user_pk {
+        return Json(ApiResponse::fail("pk_share does not match active round user share public key"));
     }
 
-    let proof_ok = schnorr_verify(
-        derived_pk,
-        proof_r,
-        proof_s,
-        &message,
-        req.proof.nonce,
-        req.proof.ts,
-    );
+    if !req.share.trim().is_empty() {
+        let supplied_share = match decode_scalar_b64(&req.share) {
+            Ok(v) => v,
+            Err(e) => return Json(ApiResponse::fail(format!("share decode: {}", e))),
+        };
+        if supplied_share != user_share {
+            return Json(ApiResponse::fail("share does not match active round user share"));
+        }
+    }
+
+    let proof_ok = schnorr_verify(user_pk, proof_r, proof_s, &message, req.proof.nonce, req.proof.ts);
     if !proof_ok {
+        eprintln!("[debug] sign_partial proof verification failed: node_id={} pk_share_b64={} R_b64={} s_b64={} nonce={} ts={} message_len={}",
+            req.node_id, req.proof.pk_share, req.proof.R, req.proof.s, req.proof.nonce, req.proof.ts, message.len());
         return Json(ApiResponse::fail("schnorr proof verification failed"));
     }
 
-    let sigma = bls_sign(&share_scalar, &message);
+    let signer_share = round.final_shares[node_index];
+    let sigma = bls_sign(&signer_share, &message);
     let sigma_b64 = match encode_g2_b64(sigma) {
         Ok(v) => v,
         Err(e) => return Json(ApiResponse::fail(format!("sigma encode: {}", e))),
@@ -700,6 +722,8 @@ async fn sign_partial(
     Json(ApiResponse::success(json!({
         "status": "issued",
         "node_id": req.node_id,
+        "round_id": round.round_id,
+        "signer_index": node_index + 1,
         "sigma": sigma_b64,
         "proof_valid": true
     })))

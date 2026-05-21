@@ -25,4 +25,4 @@ dist-ssr
 
 # User defined
 /tmp
-/target
+**/target

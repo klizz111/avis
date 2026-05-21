@@ -6,11 +6,7 @@ authors = ["you"]
 edition = "2021"
 
 [workspace]
-resolver = "3"
-members = [
-    "../crates/math_core",
-    "../api/server_example",
-]
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 
 type ApiEnvelope<T> = {
   ok: boolean;
@@ -70,20 +70,6 @@ type DkgInitData = {
   participants: string[];
   note: string;
   demo_round?: DemoRoundData;
-};
-
-type DemoRunData = {
-  status: string;
-  round_id: string;
-  threshold: number;
-  partial_count: number;
-  partial_signatures: string[];
-  signature: string;
-  verified: boolean;
-  threshold_public_key_b64: string;
-  proof_valid: boolean;
-  user_seed: number;
-  reason?: string;
 };
 
 type DemoStepStatus = "idle" | "running" | "done" | "error";
@@ -176,6 +162,7 @@ const shareValue = ref("");
 const shareCommitments = ref("");
 
 const partialNodeId = ref("node-a");
+const partialNodeIdSecondary = ref("node-b");
 const partialMessageText = ref("threshold signature demo");
 const partialShareB64 = ref("");
 const partialProofR = ref("");
@@ -186,6 +173,52 @@ const partialProofTimestamp = ref(Math.floor(Date.now() / 1000));
 
 const aggregateMessageText = ref("threshold signature demo");
 const aggregatePartialSignatures = ref("");
+const cameraVideoRef = ref<HTMLVideoElement | null>(null);
+const cameraCanvasRef = ref<HTMLCanvasElement | null>(null);
+const cameraStream = ref<MediaStream | null>(null);
+const cameraStatus = ref("Camera idle.");
+const cameraFingerprint = ref("No biometric sample captured yet.");
+const registeredAccountId = ref("account-001");
+const registeredDisplayName = ref("Demo User");
+const registrationRoundId = ref("round-001");
+const registrationThreshold = ref(2);
+const registrationParticipants = ref("node-a\nnode-b\nnode-c");
+const biometricEnrollment = ref("");
+const biometricVerification = ref("");
+const biometricScore = ref<number | null>(null);
+const onboardingStatus = ref("Idle.");
+const onboardingLog = ref("No onboarding run yet.");
+const onboardingRunning = ref(false);
+const onboardingSteps = reactive<DemoStep[]>([
+  {
+    key: "camera",
+    title: "Camera capture",
+    description: "Open the webcam and collect a biometric-like sample for the session.",
+    status: "idle",
+    detail: "Waiting to start.",
+  },
+  {
+    key: "register",
+    title: "Account registration",
+    description: "Register the account metadata and bootstrap a DKG round on the backend.",
+    status: "idle",
+    detail: "Waiting to start.",
+  },
+  {
+    key: "verify",
+    title: "Biometric re-check",
+    description: "Capture again and compare the new sample against the enrolled one.",
+    status: "idle",
+    detail: "Waiting to start.",
+  },
+  {
+    key: "sign",
+    title: "Proof and signing",
+    description: "Generate Schnorr proof, request partial signatures, and aggregate them.",
+    status: "idle",
+    detail: "Waiting to start.",
+  },
+]);
 
 const proofPayload = computed<ProofPayload>(() => ({
   R: partialProofR.value,
@@ -194,6 +227,11 @@ const proofPayload = computed<ProofPayload>(() => ({
   nonce: Number(partialProofNonce.value),
   ts: Number(partialProofTimestamp.value),
 }));
+
+const aggregateVerified = computed(() => {
+  const parsed = parseEnvelope<AggregateData>(aggregateResult.value);
+  return Boolean(parsed?.ok && parsed.data?.verified);
+});
 
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
@@ -224,8 +262,19 @@ function appendDemoLog(line: string) {
   demoLog.value = demoLog.value ? `${demoLog.value}\n${line}` : line;
 }
 
+function appendOnboardingLog(line: string) {
+  onboardingLog.value = onboardingLog.value ? `${onboardingLog.value}\n${line}` : line;
+}
+
 function resetDemoSteps() {
   demoSteps.forEach((step) => {
+    step.status = "idle";
+    step.detail = "Waiting to start.";
+  });
+}
+
+function resetOnboardingSteps() {
+  onboardingSteps.forEach((step) => {
     step.status = "idle";
     step.detail = "Waiting to start.";
   });
@@ -238,6 +287,226 @@ function updateDemoStep(key: string, status: DemoStepStatus, detail: string) {
   }
   step.status = status;
   step.detail = detail;
+}
+
+function updateOnboardingStep(key: string, status: DemoStepStatus, detail: string) {
+  const step = onboardingSteps.find((item) => item.key === key);
+  if (!step) {
+    return;
+  }
+  step.status = status;
+  step.detail = detail;
+}
+
+function stopCameraPreview() {
+  const stream = cameraStream.value;
+  if (!stream) {
+    return;
+  }
+
+  stream.getTracks().forEach((track) => track.stop());
+  cameraStream.value = null;
+
+  if (cameraVideoRef.value) {
+    cameraVideoRef.value.srcObject = null;
+  }
+}
+
+async function startCameraPreview() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    cameraStatus.value = "Camera API unavailable, falling back to simulated capture.";
+    return false;
+  }
+
+  stopCameraPreview();
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "user" },
+      audio: false,
+    });
+    cameraStream.value = stream;
+    if (cameraVideoRef.value) {
+      cameraVideoRef.value.srcObject = stream;
+      await cameraVideoRef.value.play().catch(() => undefined);
+    }
+    cameraStatus.value = "Camera preview is active.";
+    return true;
+  } catch (error) {
+    cameraStatus.value = `Camera unavailable, using simulated capture: ${error instanceof Error ? error.message : String(error)}`;
+    return false;
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+}
+
+function encodeFingerprintSource(source: string): string {
+  const bytes = new TextEncoder().encode(source);
+  return bytesToBase64(bytes);
+}
+
+async function captureBiometricFingerprint(label: string): Promise<string> {
+  const video = cameraVideoRef.value;
+  const canvas = cameraCanvasRef.value;
+
+  if (!video || !canvas || video.videoWidth === 0 || video.videoHeight === 0) {
+    return encodeFingerprintSource(`${registeredAccountId.value}|${registrationRoundId.value}|${registeredDisplayName.value}|${label}`);
+  }
+
+  const width = 48;
+  const height = 48;
+  canvas.width = width;
+  canvas.height = height;
+
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return encodeFingerprintSource(`${registeredAccountId.value}|${registrationRoundId.value}|${label}`);
+  }
+
+  context.drawImage(video, 0, 0, width, height);
+  const imageData = context.getImageData(0, 0, width, height).data;
+  const collapsed: number[] = [];
+
+  for (let index = 0; index < imageData.length; index += 16) {
+    const red = imageData[index] ?? 0;
+    const green = imageData[index + 1] ?? 0;
+    const blue = imageData[index + 2] ?? 0;
+    const alpha = imageData[index + 3] ?? 0;
+    const luminance = Math.round((red + green + blue + alpha) / 4 / 32);
+    collapsed.push(luminance);
+  }
+
+  return bytesToBase64(new Uint8Array(collapsed));
+}
+
+function fingerprintSimilarity(left: string, right: string): number {
+  if (!left || !right) {
+    return 0;
+  }
+
+  const length = Math.min(left.length, right.length);
+  let matches = 0;
+  for (let index = 0; index < length; index += 1) {
+    if (left[index] === right[index]) {
+      matches += 1;
+    }
+  }
+
+  return Math.round((matches / Math.max(length, 1)) * 100);
+}
+
+async function captureEnrollmentSample() {
+  updateOnboardingStep("camera", "running", "Capturing the enrollment sample.");
+  await startCameraPreview();
+  biometricEnrollment.value = await captureBiometricFingerprint("enroll");
+  cameraFingerprint.value = biometricEnrollment.value;
+  cameraStatus.value = `Enrollment sample captured (${biometricEnrollment.value.length} chars).`;
+  updateOnboardingStep("camera", "done", "Enrollment sample was captured from the camera or fallback simulation.");
+  appendOnboardingLog("Camera enrollment sample captured.");
+}
+
+async function captureVerificationSample() {
+  updateOnboardingStep("verify", "running", "Re-capturing biometric data for verification.");
+  biometricVerification.value = await captureBiometricFingerprint("verify");
+  cameraFingerprint.value = biometricVerification.value;
+  biometricScore.value = fingerprintSimilarity(biometricEnrollment.value, biometricVerification.value);
+  const approved = biometricScore.value >= 60;
+  cameraStatus.value = `Biometric verification ${approved ? "passed" : "needs another try"} with score ${biometricScore.value}%.`;
+  updateOnboardingStep(
+    "verify",
+    approved ? "done" : "error",
+    approved ? `Verification passed with score ${biometricScore.value}%` : `Verification score ${biometricScore.value}% is below the demo threshold`,
+  );
+  appendOnboardingLog(`Biometric verification score: ${biometricScore.value}%.`);
+  if (!approved) {
+    throw new Error("biometric verification did not meet the demo threshold");
+  }
+}
+
+async function submitRegistrationDkgInit() {
+  updateOnboardingStep("register", "running", "Sending account metadata and DKG parameters to the backend.");
+
+  const participants = registrationParticipants.value
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  const response = await postJson<DkgInitData>("/dkg/init", {
+    round_id: registrationRoundId.value,
+    threshold: Number(registrationThreshold.value),
+    participants,
+  });
+
+  dkgInitResult.value = formatJson(response);
+  if (!response.ok || !response.data?.demo_round) {
+    updateOnboardingStep("register", "error", response.error || "registration and DKG bootstrap failed");
+    throw new Error(response.error || "registration and DKG bootstrap failed");
+  }
+
+  applyDemoRound(response.data.demo_round);
+  onboardingStatus.value = `Account ${registeredAccountId.value} registered and DKG round ${registrationRoundId.value} is active.`;
+  updateOnboardingStep("register", "done", `Round ${registrationRoundId.value} accepted by the backend.`);
+  appendOnboardingLog(`Backend accepted registration for ${registeredAccountId.value}.`);
+  return response;
+}
+
+async function runOnboardingJourney() {
+  onboardingRunning.value = true;
+  onboardingStatus.value = "Running onboarding journey...";
+  onboardingLog.value = "";
+  biometricEnrollment.value = "";
+  biometricVerification.value = "";
+  biometricScore.value = null;
+  resetOnboardingSteps();
+
+  try {
+    appendOnboardingLog("1. Opening the camera and collecting a registration sample.");
+    await captureEnrollmentSample();
+
+    appendOnboardingLog("2. Registering the account and bootstrapping the DKG round.");
+    await submitRegistrationDkgInit();
+
+    appendOnboardingLog("3. Re-checking the biometric sample before signing.");
+    await captureVerificationSample();
+
+    appendOnboardingLog("4. Generating a Schnorr proof and requesting a legal threshold signature.");
+    updateOnboardingStep("sign", "running", "Generating proof, verifying it, and requesting partial signatures.");
+    const proofResponse = await generateProof();
+    if (!proofResponse) {
+      throw new Error("proof generation failed");
+    }
+
+    const proofResponseCheck = await verifyProof();
+    const proofResult = parseEnvelope<ProofVerifyData>(proofVerifyResult.value);
+    if (!proofResponseCheck.ok || !proofResult?.ok || !proofResult.data?.valid) {
+      throw new Error(proofResult?.data?.reason || proofResult?.error || proofResponseCheck.error || "proof verification failed");
+    }
+
+    await requestTwoPartialSignatures();
+    const aggregateResponse = parseEnvelope<AggregateData>(aggregateResult.value);
+    if (!aggregateResponse?.ok || !aggregateResponse.data?.verified || !aggregateResponse.data?.signature) {
+      throw new Error(aggregateResponse?.error || "aggregate verification failed");
+    }
+
+    updateOnboardingStep("sign", "done", "Proof verification and aggregate signature verification passed.");
+    onboardingStatus.value = "Onboarding flow completed successfully with a verified aggregate signature.";
+    appendOnboardingLog("Proof verification and aggregate signature verification passed.");
+  } catch (error) {
+    onboardingStatus.value = `Onboarding flow failed: ${error instanceof Error ? error.message : String(error)}`;
+    appendOnboardingLog(onboardingStatus.value);
+    const signStep = onboardingSteps.find((step) => step.key === "sign");
+    if (signStep?.status === "running") {
+      updateOnboardingStep("sign", "error", error instanceof Error ? error.message : String(error));
+    }
+  } finally {
+    onboardingRunning.value = false;
+  }
 }
 
 function applyDemoRound(round: DemoRoundData) {
@@ -258,6 +527,10 @@ function applyDemoRound(round: DemoRoundData) {
   shareCommitments.value = round.nodes[0]?.commitments_b64.join("\n") || "";
 
   partialNodeId.value = round.participants[round.user_index - 1] || partialNodeId.value;
+  partialNodeIdSecondary.value = round.participants[0] || partialNodeIdSecondary.value;
+  if (partialNodeIdSecondary.value === partialNodeId.value) {
+    partialNodeIdSecondary.value = round.participants[1] || partialNodeIdSecondary.value;
+  }
   partialShareB64.value = round.user_share_b64;
   partialProofPkShare.value = round.user_pk_share_b64;
 
@@ -401,13 +674,20 @@ async function verifyProof() {
   return response;
 }
 
-async function requestPartialSignature() {
+async function requestPartialSignatureForNode(nodeId: string) {
   const response = await postJson<PartialSignatureData>("/sign/partial", {
-    node_id: partialNodeId.value,
+    node_id: nodeId,
+    round_id: activeDemoRound.value?.round_id || dkgRoundId.value,
     message: textToBase64(partialMessageText.value),
     share: partialShareB64.value,
     proof: proofPayload.value,
   });
+
+  return response;
+}
+
+async function requestPartialSignature() {
+  const response = await requestPartialSignatureForNode(partialNodeId.value);
   partialSignResult.value = formatJson(response);
 
   try {
@@ -425,6 +705,55 @@ async function requestPartialSignature() {
   return response;
 }
 
+async function requestTwoPartialSignatures() {
+  const nodeIds = [partialNodeId.value.trim(), partialNodeIdSecondary.value.trim()]
+    .filter((value) => value.length > 0)
+    .filter((value, index, arr) => arr.indexOf(value) === index);
+
+  if (nodeIds.length < 2) {
+    partialSignResult.value = formatJson({
+      ok: false,
+      data: null,
+      error: "Please provide two different node IDs.",
+    });
+    return;
+  }
+
+  const collectedSignatures: string[] = [];
+  const perNodeResults: Array<{ node_id: string; ok: boolean; sigma?: string; error?: string | null }> = [];
+
+  for (const nodeId of nodeIds) {
+    const response = await requestPartialSignatureForNode(nodeId);
+    const sigma = response.data?.sigma;
+    if (typeof sigma === "string" && sigma.trim().length > 0) {
+      collectedSignatures.push(sigma);
+    }
+    perNodeResults.push({
+      node_id: nodeId,
+      ok: response.ok,
+      sigma: typeof sigma === "string" ? sigma : undefined,
+      error: response.error,
+    });
+  }
+
+  aggregatePartialSignatures.value = collectedSignatures.join("\n");
+
+  const allOk = perNodeResults.every((item) => item.ok && typeof item.sigma === "string" && item.sigma.length > 0);
+  partialSignResult.value = formatJson({
+    ok: allOk,
+    data: {
+      requested_nodes: nodeIds,
+      collected_count: collectedSignatures.length,
+      results: perNodeResults,
+    },
+    error: allOk ? null : "One or more partial signatures failed.",
+  });
+
+  if (collectedSignatures.length >= 2) {
+    await aggregateSignatures();
+  }
+}
+
 async function aggregateSignatures() {
   const partials = aggregatePartialSignatures.value
     .split(/\r?\n/)
@@ -432,37 +761,11 @@ async function aggregateSignatures() {
     .filter(Boolean);
 
   const response = await postJson<AggregateData>("/bls/aggregate", {
+    round_id: activeDemoRound.value?.round_id || dkgRoundId.value,
     message: textToBase64(aggregateMessageText.value),
     partial_signatures: partials,
   });
   aggregateResult.value = formatJson(response);
-  return response;
-}
-
-async function runDemoSignAndAggregate() {
-  const response = await postJson<DemoRunData>("/demo/run", {
-    round_id: activeDemoRound.value?.round_id || dkgRoundId.value,
-    message: textToBase64(partialMessageText.value),
-    proof: proofPayload.value,
-  });
-
-  partialSignResult.value = formatJson(response);
-
-  if (response.ok && response.data) {
-    aggregatePartialSignatures.value = response.data.partial_signatures.join("\n");
-    aggregateResult.value = formatJson({
-      ok: true,
-      data: {
-        status: response.data.status,
-        signature: response.data.signature,
-        verified: response.data.verified,
-        partial_count: response.data.partial_count,
-        threshold_public_key_b64: response.data.threshold_public_key_b64,
-      },
-      error: null,
-    });
-  }
-
   return response;
 }
 
@@ -534,19 +837,28 @@ async function runFullDemo() {
     updateDemoStep("proof", "done", "Schnorr verification passed.");
     appendDemoLog("   Schnorr verification passed.");
 
-    appendDemoLog("6. Asking the backend to sign and aggregate the active demo round.");
-    updateDemoStep("partial", "running", "Backend is issuing threshold partial signatures.");
-    updateDemoStep("aggregate", "running", "Backend is aggregating and verifying the final signature.");
-    await runDemoSignAndAggregate();
-    const demoRun = parseEnvelope<DemoRunData>(partialSignResult.value);
-    if (!demoRun?.ok || !demoRun.data?.verified || !demoRun.data?.signature) {
-      updateDemoStep("partial", "error", demoRun?.error || demoRun?.data?.reason || "demo signing failed");
-      updateDemoStep("aggregate", "error", demoRun?.error || demoRun?.data?.reason || "demo aggregation failed");
-      throw new Error(demoRun?.error || demoRun?.data?.reason || "demo signing failed");
+    appendDemoLog("6. Requesting two partial signatures, then aggregating on /bls/aggregate.");
+    updateDemoStep("partial", "running", "Calling /sign/partial for two selected nodes.");
+    updateDemoStep("aggregate", "running", "Calling /bls/aggregate with collected partial signatures.");
+    await requestTwoPartialSignatures();
+
+    const partialResponse = parseEnvelope<{ collected_count?: number }>(partialSignResult.value);
+    if (!partialResponse?.ok) {
+      updateDemoStep("partial", "error", partialResponse?.error || "partial signing failed");
+      updateDemoStep("aggregate", "error", "aggregation skipped because partial signing failed");
+      throw new Error(partialResponse?.error || "partial signing failed");
     }
-    updateDemoStep("partial", "done", `Backend returned ${demoRun.data.partial_count} partial signatures.`);
-    updateDemoStep("aggregate", "done", "Aggregate signature verified by the backend.");
-    appendDemoLog("   Backend demo run completed and verified.");
+
+    const aggregateResponse = parseEnvelope<AggregateData>(aggregateResult.value);
+    if (!aggregateResponse?.ok || !aggregateResponse.data?.verified || !aggregateResponse.data?.signature) {
+      updateDemoStep("partial", "done", `Collected ${partialResponse.data?.collected_count ?? 0} partial signatures.`);
+      updateDemoStep("aggregate", "error", aggregateResponse?.error || "aggregate verification failed");
+      throw new Error(aggregateResponse?.error || "aggregate verification failed");
+    }
+
+    updateDemoStep("partial", "done", `Collected ${partialResponse.data?.collected_count ?? 0} partial signatures.`);
+    updateDemoStep("aggregate", "done", "Aggregate signature verified by /bls/aggregate.");
+    appendDemoLog("   /sign/partial and /bls/aggregate completed with verification passed.");
 
     demoStatus.value = "Demo completed successfully.";
   } catch (error) {
@@ -568,6 +880,10 @@ onMounted(() => {
   if (savedBaseUrl) {
     apiBaseUrl.value = savedBaseUrl;
   }
+});
+
+onUnmounted(() => {
+  stopCameraPreview();
 });
 
 watch(apiBaseUrl, (value) => {
@@ -598,6 +914,101 @@ watch(apiBaseUrl, (value) => {
         <div class="metric">
           <span>Demo status</span>
           <strong>{{ demoStatus }}</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="card panel onboarding-panel">
+      <div class="panel-head">
+        <div>
+          <p class="panel-kicker">New interface</p>
+          <h2>Camera enrollment, backend registration, and biometric re-check</h2>
+        </div>
+      </div>
+      <p class="hero-copy demo-copy">
+        This workflow simulates camera collection first, registers the account through the backend DKG round,
+        then asks for a second biometric check before generating Schnorr proof material and requesting a valid signature.
+      </p>
+
+      <div class="grid onboarding-grid">
+        <div class="camera-card">
+          <video ref="cameraVideoRef" class="camera-feed" autoplay playsinline muted></video>
+          <canvas ref="cameraCanvasRef" class="camera-canvas" aria-hidden="true"></canvas>
+          <div class="camera-summary">
+            <div>
+              <span>Camera state</span>
+              <strong>{{ cameraStatus }}</strong>
+            </div>
+            <div>
+              <span>Biometric sample</span>
+              <strong>{{ cameraFingerprint }}</strong>
+            </div>
+            <div>
+              <span>Match score</span>
+              <strong>{{ biometricScore === null ? 'No verification yet' : `${biometricScore}%` }}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="stack">
+          <div class="grid form-grid">
+            <label class="field">
+              <span>Account ID</span>
+              <input v-model="registeredAccountId" type="text" />
+            </label>
+            <label class="field">
+              <span>Display name</span>
+              <input v-model="registeredDisplayName" type="text" />
+            </label>
+            <label class="field">
+              <span>Round ID</span>
+              <input v-model="registrationRoundId" type="text" />
+            </label>
+            <label class="field">
+              <span>Threshold</span>
+              <input v-model="registrationThreshold" type="number" min="1" />
+            </label>
+            <label class="field wide">
+              <span>Participants, one per line</span>
+              <textarea v-model="registrationParticipants" rows="4" />
+            </label>
+          </div>
+
+          <div class="actions">
+            <button type="button" @click="startCameraPreview">Enable camera</button>
+            <button type="button" class="secondary" @click="captureEnrollmentSample">Capture enrollment sample</button>
+            <button type="button" class="secondary" @click="captureVerificationSample">Capture verification sample</button>
+            <button type="button" @click="runOnboardingJourney" :disabled="onboardingRunning">Run onboarding journey</button>
+          </div>
+
+          <div class="step-grid onboarding-step-grid">
+            <article v-for="step in onboardingSteps" :key="step.key" class="step-card" :class="step.status">
+              <div class="step-card-head">
+                <div>
+                  <p class="step-label">{{ step.key }}</p>
+                  <h3>{{ step.title }}</h3>
+                </div>
+                <span class="step-badge">{{ step.status }}</span>
+              </div>
+              <p class="step-copy">{{ step.description }}</p>
+              <pre>{{ step.detail }}</pre>
+            </article>
+          </div>
+
+          <div class="stack onboarding-summary">
+            <details open>
+              <summary>Onboarding status</summary>
+              <pre>{{ onboardingStatus }}</pre>
+            </details>
+            <details>
+              <summary>Biometric samples</summary>
+              <pre>{{ formatJson({ enrollment: biometricEnrollment, verification: biometricVerification }) }}</pre>
+            </details>
+            <details>
+              <summary>Onboarding log</summary>
+              <pre class="demo-log">{{ onboardingLog }}</pre>
+            </details>
+          </div>
         </div>
       </div>
     </section>
@@ -798,8 +1209,12 @@ watch(apiBaseUrl, (value) => {
         </div>
         <div class="grid form-grid">
           <label class="field">
-            <span>Node ID</span>
+            <span>Node ID (primary)</span>
             <input v-model="partialNodeId" type="text" />
+          </label>
+          <label class="field">
+            <span>Node ID (secondary)</span>
+            <input v-model="partialNodeIdSecondary" type="text" />
           </label>
           <label class="field wide">
             <span>Message</span>
@@ -833,19 +1248,21 @@ watch(apiBaseUrl, (value) => {
         <div class="actions">
           <button type="button" @click="verifyProof">Verify proof</button>
           <button type="button" class="secondary" @click="requestPartialSignature">Request partial signature</button>
+          <button type="button" class="secondary" @click="requestTwoPartialSignatures">Request two partial signatures</button>
         </div>
         <pre>{{ proofVerifyResult }}</pre>
         <pre>{{ partialSignResult }}</pre>
       </article>
     </section>
 
-    <section class="card panel">
+    <section class="card panel" :class="{ 'aggregate-success': aggregateVerified }">
       <div class="panel-head">
         <div>
           <p class="panel-kicker">Aggregation</p>
           <h2>Combine partial signatures into one BLS aggregate</h2>
         </div>
       </div>
+      <p v-if="aggregateVerified" class="success-banner">Aggregate verification passed.</p>
       <div class="grid form-grid">
         <label class="field wide">
           <span>Message</span>
@@ -1113,6 +1530,75 @@ details pre {
   margin-top: 18px;
 }
 
+.onboarding-panel {
+  margin-top: 18px;
+  border: 1px solid rgba(37, 112, 143, 0.18);
+  background:
+    radial-gradient(circle at top left, rgba(75, 146, 170, 0.14), transparent 30%),
+    radial-gradient(circle at top right, rgba(245, 179, 92, 0.12), transparent 26%),
+    rgba(255, 255, 255, 0.76);
+}
+
+.onboarding-grid {
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 18px;
+}
+
+.camera-card {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+.camera-feed {
+  width: 100%;
+  min-height: 320px;
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(19, 38, 58, 0.92), rgba(20, 48, 63, 0.84));
+  object-fit: cover;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.camera-canvas {
+  display: none;
+}
+
+.camera-summary {
+  display: grid;
+  gap: 12px;
+}
+
+.camera-summary > div {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(24, 39, 57, 0.08);
+}
+
+.camera-summary span {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: rgba(18, 33, 47, 0.56);
+}
+
+.camera-summary strong {
+  display: block;
+  word-break: break-word;
+  color: #12212f;
+  line-height: 1.45;
+}
+
+.onboarding-step-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.onboarding-summary {
+  margin-top: 4px;
+}
+
 .demo-copy {
   margin-bottom: 14px;
 }
@@ -1208,9 +1694,45 @@ details pre {
   min-height: 126px;
 }
 
+.aggregate-success {
+  border-color: rgba(32, 150, 107, 0.45);
+  box-shadow:
+    0 20px 60px rgba(24, 39, 57, 0.09),
+    0 0 0 2px rgba(32, 150, 107, 0.18) inset,
+    0 0 0 6px rgba(32, 150, 107, 0.08);
+}
+
+.success-banner {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-weight: 700;
+  color: #176247;
+  background: linear-gradient(135deg, rgba(151, 255, 221, 0.42), rgba(217, 255, 240, 0.82));
+  border: 1px solid rgba(32, 150, 107, 0.32);
+  animation: glowPulse 1.2s ease-in-out 2;
+}
+
+@keyframes glowPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(32, 150, 107, 0.28);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(32, 150, 107, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(32, 150, 107, 0);
+  }
+}
+
 @media (max-width: 1080px) {
   .hero,
   .two-up {
+    grid-template-columns: 1fr;
+  }
+
+  .onboarding-grid,
+  .onboarding-step-grid {
     grid-template-columns: 1fr;
   }
 
