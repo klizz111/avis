@@ -82,6 +82,14 @@ type DemoStep = {
   detail: string;
 };
 
+type ActiveView = "onboarding" | "console";
+
+type SignatureAuditDecision = {
+  node_id: string;
+  approved: boolean;
+  reason: string;
+};
+
 const apiBaseUrl = ref(localStorage.getItem("avis.apiBaseUrl") || "http://127.0.0.1:8443/api/v1");
 const proofMessageText = ref("threshold signature demo");
 const shareSeed = ref(7);
@@ -173,6 +181,12 @@ const partialProofTimestamp = ref(Math.floor(Date.now() / 1000));
 
 const aggregateMessageText = ref("threshold signature demo");
 const aggregatePartialSignatures = ref("");
+const signatureMessageText = ref("Audit release: all nodes approve the signing request.");
+const signatureAuditReport = ref("No signature audit has run yet.");
+const signatureVerificationReport = ref("No signature verification has run yet.");
+const lastAggregatedSignature = ref("No aggregated signature yet.");
+const signatureFlowStatus = ref("Idle.");
+const activeView = ref<ActiveView>("onboarding");
 const cameraVideoRef = ref<HTMLVideoElement | null>(null);
 const cameraCanvasRef = ref<HTMLCanvasElement | null>(null);
 const cameraStream = ref<MediaStream | null>(null);
@@ -233,6 +247,11 @@ const aggregateVerified = computed(() => {
   return Boolean(parsed?.ok && parsed.data?.verified);
 });
 
+const allowedSignatureMessage = "Audit release: all nodes approve the signing request.";
+const blockedSignatureMessage = "Audit release: node-b and node-c reject this signing request.";
+
+// const activeStatusText = computed(() => (activeView.value === "onboarding" ? onboardingStatus.value : demoStatus.value));
+
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
 }
@@ -264,6 +283,155 @@ function appendDemoLog(line: string) {
 
 function appendOnboardingLog(line: string) {
   onboardingLog.value = onboardingLog.value ? `${onboardingLog.value}\n${line}` : line;
+}
+
+function syncSignatureMessage(message: string) {
+  signatureMessageText.value = message;
+  proofMessageText.value = message;
+  partialMessageText.value = message;
+  aggregateMessageText.value = message;
+}
+
+function applySignaturePreset(kind: "allow" | "block") {
+  syncSignatureMessage(kind === "allow" ? allowedSignatureMessage : blockedSignatureMessage);
+  signatureFlowStatus.value = kind === "allow" ? "Loaded the all-nodes-approve message." : "Loaded the node-b/node-c rejection message.";
+  signatureAuditReport.value = "Preset selected. Run audited signing to inspect decisions.";
+  signatureVerificationReport.value = "No signature verification has run yet.";
+}
+
+function auditSignatureRequest(nodeId: string, message: string): SignatureAuditDecision {
+  if (message === blockedSignatureMessage && (nodeId === "node-b" || nodeId === "node-c")) {
+    return {
+      node_id: nodeId,
+      approved: false,
+      reason: "frontend audit rule: node-b and node-c reject this message",
+    };
+  }
+
+  if (message === allowedSignatureMessage) {
+    return {
+      node_id: nodeId,
+      approved: true,
+      reason: "frontend audit rule: message accepted by all nodes",
+    };
+  }
+
+  return {
+    node_id: nodeId,
+    approved: true,
+    reason: "frontend audit rule: custom message treated as approved",
+  };
+}
+
+function collectAuditedNodeIds(): string[] {
+  const nodes = activeDemoRound.value?.participants?.length
+    ? activeDemoRound.value.participants
+    : dkgParticipants.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+
+  return Array.from(new Set(nodes.length > 0 ? nodes : ["node-a", "node-b", "node-c"]));
+}
+
+async function runAuditedSignatureFlow() {
+  signatureFlowStatus.value = "Running audited signing flow...";
+  signatureAuditReport.value = "";
+  signatureVerificationReport.value = "";
+  lastAggregatedSignature.value = "No aggregated signature yet.";
+  aggregatePartialSignatures.value = "";
+  aggregateResult.value = "No aggregate has been generated yet.";
+
+  try {
+    syncSignatureMessage(signatureMessageText.value || allowedSignatureMessage);
+
+    const proofResponse = await generateProof();
+    if (!proofResponse) {
+      throw new Error("proof generation failed");
+    }
+
+    const proofResponseCheck = await verifyProof();
+    const proofResult = parseEnvelope<ProofVerifyData>(proofVerifyResult.value);
+    if (!proofResponseCheck.ok || !proofResult?.ok || !proofResult.data?.valid) {
+      throw new Error(proofResult?.data?.reason || proofResult?.error || proofResponseCheck.error || "proof verification failed");
+    }
+
+    const auditedNodeIds = collectAuditedNodeIds();
+    const auditDecisions = auditedNodeIds.map((nodeId) => auditSignatureRequest(nodeId, signatureMessageText.value));
+    signatureAuditReport.value = formatJson({
+      message: signatureMessageText.value,
+      auditDecisions,
+    });
+
+    const approvedNodes = auditDecisions.filter((decision) => decision.approved).map((decision) => decision.node_id);
+    if (approvedNodes.length < Number(dkgThreshold.value)) {
+      const auditError = {
+        ok: false,
+        data: {
+          approved_nodes: approvedNodes,
+          required_threshold: Number(dkgThreshold.value),
+        },
+        error: "Audit rejected enough nodes that a full aggregate signature cannot be produced.",
+      };
+      partialSignResult.value = formatJson(auditError);
+      aggregateResult.value = formatJson(auditError);
+      lastAggregatedSignature.value = "No complete signature could be generated because the audit blocked too many nodes.";
+      signatureVerificationReport.value = "Skipped: insufficient approved nodes for full aggregation.";
+      signatureFlowStatus.value = "Audit blocked the signing flow before full aggregation.";
+      return;
+    }
+
+    const collectedSignatures: string[] = [];
+    const perNodeResults: Array<{ node_id: string; ok: boolean; sigma?: string; error?: string | null }> = [];
+
+    for (const nodeId of approvedNodes) {
+      const response = await requestPartialSignatureForNode(nodeId);
+      const sigma = response.data?.sigma;
+      if (typeof sigma === "string" && sigma.trim().length > 0) {
+        collectedSignatures.push(sigma);
+      }
+      perNodeResults.push({
+        node_id: nodeId,
+        ok: response.ok,
+        sigma: typeof sigma === "string" ? sigma : undefined,
+        error: response.error,
+      });
+    }
+
+    aggregatePartialSignatures.value = collectedSignatures.join("\n");
+    partialSignResult.value = formatJson({
+      ok: true,
+      data: {
+        requested_nodes: approvedNodes,
+        collected_count: collectedSignatures.length,
+        results: perNodeResults,
+      },
+      error: null,
+    });
+
+    const aggregateResponse = await aggregateSignatures();
+    if (!aggregateResponse.ok || !aggregateResponse.data?.verified || !aggregateResponse.data?.signature) {
+      throw new Error(aggregateResponse.error || "aggregate verification failed");
+    }
+
+    lastAggregatedSignature.value = aggregateResponse.data.signature;
+    signatureVerificationReport.value = formatJson(aggregateResponse);
+    signatureFlowStatus.value = "Audited signing completed and the aggregate signature was verified.";
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    signatureFlowStatus.value = `Audited signing failed: ${message}`;
+    signatureVerificationReport.value = message;
+  }
+}
+
+async function verifyLastAggregatedSignature() {
+  if (!aggregatePartialSignatures.value.trim()) {
+    signatureVerificationReport.value = "No partial signatures are available to verify.";
+    return;
+  }
+
+  const response = await aggregateSignatures();
+  signatureVerificationReport.value = formatJson(response);
+  if (response.ok && response.data?.signature) {
+    lastAggregatedSignature.value = response.data.signature;
+  }
 }
 
 function resetDemoSteps() {
@@ -351,6 +519,19 @@ function encodeFingerprintSource(source: string): string {
   return bytesToBase64(bytes);
 }
 
+function base64ToBytes(value: string): Uint8Array | null {
+  try {
+    const binary = atob(value);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
 async function captureBiometricFingerprint(label: string): Promise<string> {
   const video = cameraVideoRef.value;
   const canvas = cameraCanvasRef.value;
@@ -359,8 +540,8 @@ async function captureBiometricFingerprint(label: string): Promise<string> {
     return encodeFingerprintSource(`${registeredAccountId.value}|${registrationRoundId.value}|${registeredDisplayName.value}|${label}`);
   }
 
-  const width = 48;
-  const height = 48;
+  const width = 24;
+  const height = 24;
   canvas.width = width;
   canvas.height = height;
 
@@ -372,14 +553,26 @@ async function captureBiometricFingerprint(label: string): Promise<string> {
   context.drawImage(video, 0, 0, width, height);
   const imageData = context.getImageData(0, 0, width, height).data;
   const collapsed: number[] = [];
+  const blockSize = 6;
 
-  for (let index = 0; index < imageData.length; index += 16) {
-    const red = imageData[index] ?? 0;
-    const green = imageData[index + 1] ?? 0;
-    const blue = imageData[index + 2] ?? 0;
-    const alpha = imageData[index + 3] ?? 0;
-    const luminance = Math.round((red + green + blue + alpha) / 4 / 32);
-    collapsed.push(luminance);
+  for (let y = 0; y < height; y += blockSize) {
+    for (let x = 0; x < width; x += blockSize) {
+      let total = 0;
+      let count = 0;
+
+      for (let innerY = y; innerY < Math.min(y + blockSize, height); innerY += 1) {
+        for (let innerX = x; innerX < Math.min(x + blockSize, width); innerX += 1) {
+          const offset = (innerY * width + innerX) * 4;
+          const red = imageData[offset] ?? 0;
+          const green = imageData[offset + 1] ?? 0;
+          const blue = imageData[offset + 2] ?? 0;
+          total += Math.round((red + green + blue) / 3);
+          count += 1;
+        }
+      }
+
+      collapsed.push(Math.round(total / Math.max(count, 1)));
+    }
   }
 
   return bytesToBase64(new Uint8Array(collapsed));
@@ -390,15 +583,22 @@ function fingerprintSimilarity(left: string, right: string): number {
     return 0;
   }
 
-  const length = Math.min(left.length, right.length);
-  let matches = 0;
-  for (let index = 0; index < length; index += 1) {
-    if (left[index] === right[index]) {
-      matches += 1;
-    }
+  const leftBytes = base64ToBytes(left) ?? new TextEncoder().encode(left);
+  const rightBytes = base64ToBytes(right) ?? new TextEncoder().encode(right);
+  const length = Math.min(leftBytes.length, rightBytes.length);
+
+  if (length === 0) {
+    return 0;
   }
 
-  return Math.round((matches / Math.max(length, 1)) * 100);
+  let totalDifference = 0;
+  for (let index = 0; index < length; index += 1) {
+    totalDifference += Math.abs((leftBytes[index] ?? 0) - (rightBytes[index] ?? 0));
+  }
+
+  const averageDifference = totalDifference / length;
+  const score = 100 - Math.round((averageDifference / 255) * 100);
+  return Math.max(0, Math.min(100, score));
 }
 
 async function captureEnrollmentSample() {
@@ -416,7 +616,7 @@ async function captureVerificationSample() {
   biometricVerification.value = await captureBiometricFingerprint("verify");
   cameraFingerprint.value = biometricVerification.value;
   biometricScore.value = fingerprintSimilarity(biometricEnrollment.value, biometricVerification.value);
-  const approved = biometricScore.value >= 60;
+  const approved = biometricScore.value >= 55;
   cameraStatus.value = `Biometric verification ${approved ? "passed" : "needs another try"} with score ${biometricScore.value}%.`;
   updateOnboardingStep(
     "verify",
@@ -766,6 +966,10 @@ async function aggregateSignatures() {
     partial_signatures: partials,
   });
   aggregateResult.value = formatJson(response);
+  if (response.ok && response.data?.signature) {
+    lastAggregatedSignature.value = response.data.signature;
+  }
+  signatureVerificationReport.value = formatJson(response);
   return response;
 }
 
@@ -889,34 +1093,50 @@ onUnmounted(() => {
 watch(apiBaseUrl, (value) => {
   localStorage.setItem("avis.apiBaseUrl", value);
 });
+
+watch(signatureMessageText, (value) => {
+  proofMessageText.value = value;
+  partialMessageText.value = value;
+  aggregateMessageText.value = value;
+});
 </script>
 
 <template>
   <main class="shell">
     <section class="hero card">
       <div>
-        <p class="eyebrow">Tauri threshold signer</p>
-        <h1>Proof generation, partial signing, and BLS aggregation in one workspace.</h1>
-        <p class="hero-copy">
-          Generate a local Schnorr proof from a demo share seed, verify it against the example API,
-          and push the resulting partial signatures into the aggregation endpoint.
-        </p>
-      </div>
-      <div class="hero-meta">
-        <div class="metric">
-          <span>API base</span>
-          <strong>{{ normalizeBaseUrl(apiBaseUrl) }}</strong>
-        </div>
-        <div class="metric">
-          <span>Proof state</span>
-          <strong>{{ generatedProof ? "ready" : "idle" }}</strong>
-        </div>
-        <div class="metric">
-          <span>Demo status</span>
-          <strong>{{ demoStatus }}</strong>
-        </div>
+        <h1>Avis</h1>
       </div>
     </section>
+
+    <section class="card panel view-switch-panel">
+      <div class="view-switch-head">
+        <div>
+          <p class="panel-kicker">Interface switch</p>
+          <h2>Choose onboarding interface or legacy console</h2>
+        </div>
+      </div>
+      <div class="view-switch-actions">
+        <button
+          type="button"
+          class="switch-button"
+          :class="{ active: activeView === 'onboarding' }"
+          @click="activeView = 'onboarding'"
+        >
+          New onboarding interface
+        </button>
+        <button
+          type="button"
+          class="switch-button secondary"
+          :class="{ active: activeView === 'console' }"
+          @click="activeView = 'console'"
+        >
+          Legacy console
+        </button>
+      </div>
+    </section>
+
+    <template v-if="activeView === 'onboarding'">
 
     <section class="card panel onboarding-panel">
       <div class="panel-head">
@@ -1009,9 +1229,67 @@ watch(apiBaseUrl, (value) => {
               <pre class="demo-log">{{ onboardingLog }}</pre>
             </details>
           </div>
+
+          <section class="card panel onboarding-signature-panel">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">Signature business logic</p>
+                <h2>Custom signature audit, aggregation, and verification</h2>
+              </div>
+            </div>
+            <p class="hero-copy demo-copy">
+              The onboarding interface now includes the same signing workflow: choose a custom message, apply a preset audit rule,
+              generate signatures, and verify the last aggregate directly in this flow.
+            </p>
+            <div class="grid form-grid">
+              <label class="field wide">
+                <span>Custom signature message</span>
+                <textarea v-model="signatureMessageText" rows="3" placeholder="Describe the signing request here" />
+              </label>
+            </div>
+            <div class="actions">
+              <button type="button" @click="applySignaturePreset('allow')">Load all-nodes-approved message</button>
+              <button type="button" class="secondary" @click="applySignaturePreset('block')">Load node-b/node-c rejected message</button>
+              <button type="button" @click="runAuditedSignatureFlow">Run audited signing</button>
+              <button type="button" class="secondary" @click="verifyLastAggregatedSignature">Verify signature</button>
+            </div>
+            <div class="stack">
+              <details open>
+                <summary>Audit report</summary>
+                <pre>{{ signatureAuditReport }}</pre>
+              </details>
+              <details open>
+                <summary>Last aggregated signature</summary>
+                <pre>{{ lastAggregatedSignature }}</pre>
+              </details>
+              <details>
+                <summary>Signature verification</summary>
+                <pre>{{ signatureVerificationReport }}</pre>
+              </details>
+              <details>
+                <summary>Signature workflow status</summary>
+                <pre>{{ signatureFlowStatus }}</pre>
+              </details>
+            </div>
+            <p v-if="aggregateVerified" class="success-banner">Aggregate verification passed.</p>
+            <div class="grid form-grid">
+              <label class="field wide">
+                <span>Partial signatures base64</span>
+                <textarea v-model="aggregatePartialSignatures" rows="5" placeholder="One base64 G2 signature per line" />
+              </label>
+            </div>
+            <div class="actions">
+              <button type="button" @click="aggregateSignatures">Aggregate signatures</button>
+            </div>
+            <pre>{{ aggregateResult }}</pre>
+          </section>
         </div>
       </div>
     </section>
+
+    </template>
+
+    <template v-else>
 
     <section class="card panel demo-panel">
       <div class="panel-head">
@@ -1259,15 +1537,45 @@ watch(apiBaseUrl, (value) => {
       <div class="panel-head">
         <div>
           <p class="panel-kicker">Aggregation</p>
-          <h2>Combine partial signatures into one BLS aggregate</h2>
+          <h2>Custom signature audit, aggregation, and verification</h2>
         </div>
+      </div>
+      <p class="hero-copy demo-copy">
+        Use the two preset messages to simulate a message that all nodes accept or a message that node-b and node-c reject.
+        The audit happens in the frontend before any partial signature request is sent.
+      </p>
+      <div class="grid form-grid">
+        <label class="field wide">
+          <span>Custom signature message</span>
+          <textarea v-model="signatureMessageText" rows="3" placeholder="Describe the signing request here" />
+        </label>
+      </div>
+      <div class="actions">
+        <button type="button" @click="applySignaturePreset('allow')">Load all-nodes-approved message</button>
+        <button type="button" class="secondary" @click="applySignaturePreset('block')">Load node-b/node-c rejected message</button>
+        <button type="button" @click="runAuditedSignatureFlow">Run audited signing</button>
+        <button type="button" class="secondary" @click="verifyLastAggregatedSignature">Verify signature</button>
+      </div>
+      <div class="stack">
+        <details open>
+          <summary>Audit report</summary>
+          <pre>{{ signatureAuditReport }}</pre>
+        </details>
+        <details open>
+          <summary>Last aggregated signature</summary>
+          <pre>{{ lastAggregatedSignature }}</pre>
+        </details>
+        <details>
+          <summary>Signature verification</summary>
+          <pre>{{ signatureVerificationReport }}</pre>
+        </details>
+        <details>
+          <summary>Signature workflow status</summary>
+          <pre>{{ signatureFlowStatus }}</pre>
+        </details>
       </div>
       <p v-if="aggregateVerified" class="success-banner">Aggregate verification passed.</p>
       <div class="grid form-grid">
-        <label class="field wide">
-          <span>Message</span>
-          <textarea v-model="aggregateMessageText" rows="3" />
-        </label>
         <label class="field wide">
           <span>Partial signatures base64</span>
           <textarea v-model="aggregatePartialSignatures" rows="5" placeholder="One base64 G2 signature per line" />
@@ -1278,6 +1586,8 @@ watch(apiBaseUrl, (value) => {
       </div>
       <pre>{{ aggregateResult }}</pre>
     </section>
+
+    </template>
   </main>
 </template>
 
@@ -1394,6 +1704,29 @@ h1 {
 
 .panel {
   padding: 22px;
+}
+
+.view-switch-panel {
+  margin-top: 18px;
+}
+
+.view-switch-head {
+  margin-bottom: 12px;
+}
+
+.view-switch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.switch-button {
+  min-width: 220px;
+}
+
+.switch-button.active {
+  box-shadow: 0 0 0 3px rgba(40, 107, 138, 0.2);
+  transform: translateY(-1px);
 }
 
 .panel-head {
