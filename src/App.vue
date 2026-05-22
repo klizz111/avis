@@ -1,5 +1,24 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { checkAccessibilityPermission } from "tauri-plugin-macos-permissions-api";
+
+const accessibilityPermissionStatus = ref<"unknown" | "granted" | "denied" | "error">("unknown");
+
+async function refreshAccessibilityPermission() {
+  try {
+    const authorized = await Promise.race([
+      checkAccessibilityPermission(),
+      new Promise<boolean>((_resolve, reject) => {
+        setTimeout(() => reject(new Error("permission check timeout")), 3000);
+      }),
+    ]);
+    accessibilityPermissionStatus.value = authorized ? "granted" : "denied";
+    console.log("accessibility permission:", authorized);
+  } catch (error) {
+    accessibilityPermissionStatus.value = "error";
+    console.warn("accessibility permission check failed:", error);
+  }
+}
 
 type ApiEnvelope<T> = {
   ok: boolean;
@@ -1084,6 +1103,9 @@ onMounted(() => {
   if (savedBaseUrl) {
     apiBaseUrl.value = savedBaseUrl;
   }
+
+  // Run permission check after mount to avoid blocking initial render.
+  void refreshAccessibilityPermission();
 });
 
 onUnmounted(() => {
