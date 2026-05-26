@@ -30,7 +30,8 @@ sequenceDiagram
 
     rect rgb(240, 248, 255)
         note over User,NodeD: 阶段一：DKG 生成份额（无人持有完整私钥）
-        User->>User: 1. 生成本地随机种子并参与 DKG, 生成多项式 f_U 并广播承诺 C_U, 得到自己的私钥 SK_U = f_U(0) 和公钥 PK_U
+        User->>User: 1. 基于个人生物特征生成随机数, 生成多项式 f_U 并广播承诺 C_U, 得到自己的私钥 SK_U = f_U(0) 和公钥 PK_U
+        User-->>User: 利用个人生物特征作为私钥，通过对称加密保存私钥
         NodeA->>NodeA: 2. 生成多项式 f_A 并广播承诺 C_A
         NodeB->>NodeB: 3. 生成多项式 f_B 并广播承诺 C_B
         NodeC->>NodeC: 4. 生成多项式 f_C 并广播承诺 C_C
@@ -41,7 +42,7 @@ sequenceDiagram
 
     rect rgb(255, 250, 240)
         note over User,NodeD: 阶段二：用户发起签名请求，先进入 AI 审计层再进入 MPC 节点
-        User->>User: 8. 生成 Schnorr NIZK 证明 自己持有 PK_U 对应的私钥 SK_U
+        User->>User: 8. 通过个人生物特征解锁私钥 SK_U, 生成 Schnorr NIZK 证明 自己持有 PK_U 对应的私钥 SK_U
         User->>AIAudit: 9. 发送 Sign_Request(M, Proof_share, nonce, ts)
         AIAudit->>AIAudit: 10. 识别签名请求意图、风险特征与异常上下文（异步）
         AIAudit->>NodeA: 11. 放行给 MPC 节点 A
@@ -212,7 +213,7 @@ $$
 - [ ] 将 API 草案和后端实现进一步收敛，减少示例字段和最终字段之间的偏差
 - [ ] 增加更正式的错误处理、审计日志和重放保护展示
 
-## 给后续开发者 / AI agent 的提示
+## 给后续开发的提示
 
 - 优先看 `crates/math_core`，协议正确性都从这里开始。
 - 前端目前是一个协议控制台，不是业务产品界面，先保证流程可跑通，再谈收敛和美化。
