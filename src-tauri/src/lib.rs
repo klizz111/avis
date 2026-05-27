@@ -56,11 +56,6 @@ fn generate_demo_proof(message: String, seed: u64, nonce: u64, timestamp: u64) -
 }
 
 #[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
-#[tauri::command]
 fn add_numbers(a: f64, b: f64) -> f64 {
     a + b
 }
@@ -71,7 +66,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_macos_permissions::init())
-        .invoke_handler(tauri::generate_handler![greet, add_numbers, generate_demo_proof])
+        .invoke_handler(tauri::generate_handler![add_numbers, generate_demo_proof])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

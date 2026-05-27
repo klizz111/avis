@@ -1,9 +1,9 @@
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
-use ark_bn254::{Fq as PolyScalar, Fr as Scalar, G1Affine};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use ark_bn254::{Fq as PolyScalar, Fr as Scalar, G1Affine, G2Affine, G2Projective};
 use ark_ec::{AffineRepr, CurveGroup};
-use ark_ff::UniformRand;
+use ark_ff::{UniformRand, Zero};
 use ark_std::rand::{rngs::StdRng, SeedableRng};
 use math_core::{bls, dkg, poly, schnorr};
 
@@ -128,6 +128,46 @@ fn bench_bls_verify(c: &mut Criterion) {
     });
 }
 
+fn aggregate_partial_signatures(partial_sigs: &[G2Affine], indices: &[u64]) -> G2Affine {
+    let mut aggregated = G2Projective::zero();
+
+    for j in 0..partial_sigs.len() {
+        let lambda = dkg::lagrange_coeff_at_zero(indices, j);
+        aggregated += &(partial_sigs[j] * lambda);
+    }
+
+    aggregated.into_affine()
+}
+
+fn bench_bls_aggregate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bls/aggregate");
+
+    for &signature_count in &[5usize, 10, 20] {
+        let (_, _, final_shares, _, _) = dkg::simulate_dkg(signature_count, signature_count);
+        let message = b"math_core bls aggregate benchmark";
+
+        let mut partial_sigs = Vec::with_capacity(signature_count);
+        let mut indices = Vec::with_capacity(signature_count);
+
+        for j in 0..signature_count {
+            partial_sigs.push(bls::sign(&final_shares[j], message));
+            indices.push((j + 1) as u64);
+        }
+
+        group.bench_with_input(BenchmarkId::new("aggregate", signature_count), &signature_count, |b, _| {
+            b.iter(|| {
+                let aggregated = aggregate_partial_signatures(
+                    black_box(&partial_sigs),
+                    black_box(&indices),
+                );
+                black_box(aggregated);
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_schnorr_prove(c: &mut Criterion) {
     c.bench_function("schnorr/prove", |b| {
         let mut rng = seeded_rng(19);
@@ -189,6 +229,7 @@ criterion_group!(
     bench_bls_key_gen,
     bench_bls_sign,
     bench_bls_verify,
+    bench_bls_aggregate,
     bench_schnorr_prove,
     bench_schnorr_verify,
 );

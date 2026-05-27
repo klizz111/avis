@@ -3,6 +3,26 @@
 version = 4
 
 [[package]]
+name = "Avis"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254",
+ "ark-ec",
+ "ark-serialize",
+ "ark-std",
+ "base64 0.21.7",
+ "math_core",
+ "rand",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-macos-permissions",
+ "tauri-plugin-opener",
+ "tauri-plugin-store",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3692,26 +3712,6 @@ dependencies = [
  "webview2-com",
  "window-vibrancy",
  "windows",
-]
-
-[[package]]
-name = "tauri-app"
-version = "0.1.0"
-dependencies = [
- "ark-bn254",
- "ark-ec",
- "ark-serialize",
- "ark-std",
- "base64 0.21.7",
- "math_core",
- "rand",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-macos-permissions",
- "tauri-plugin-opener",
- "tauri-plugin-store",
 ]
 
 [[package]]

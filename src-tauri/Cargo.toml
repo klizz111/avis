@@ -1,8 +1,8 @@
 [package]
-name = "tauri-app"
+name = "Avis"
 version = "0.1.0"
 description = "A Tauri App"
-authors = ["you"]
+authors = ["klizz"]
 edition = "2021"
 
 [workspace]

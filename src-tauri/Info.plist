@@ -3,8 +3,10 @@
 <plist version="1.0">
 <dict>
   <key>NSCameraUsageDescription</key>
-  <string>Request camera access for WebRTC</string>
+  <string>请求访问你的摄像头</string>
+  <!-- 
   <key>NSMicrophoneUsageDescription</key>
   <string>Request microphone access for WebRTC</string>
+  -->
 </dict>
 </plist>
